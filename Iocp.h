@@ -46,6 +46,8 @@ class Iocp {
     void WorkerThread();
     void SendPacket(SocketInfo *socketInfo, SendContext *sendContext, DWORD messageLength);
 
+    bool PostSend(SocketInfo *socketInfo, SendContext *sendContext);
+
     void SetNickName(SocketInfo *socketInfo, std::string nickName);
 
     void WisperMessage(SocketInfo *sender, const std::string &target, const std::string &message);

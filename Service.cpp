@@ -22,8 +22,6 @@ void Service::RemoveUser(SocketInfo* socketInfo) {
 
 void Service::GetAvailableUsersNickname(SocketInfo* giveMeUsers, Iocp& iocp) {
     SendContext *sendContext = new SendContext();
-    ZeroMemory(&sendContext->overlapped, sizeof(WSAOVERLAPPED));
-    sendContext->sendBuf.buf = sendContext->buffer;
 
     packetHeader* pHeader = (packetHeader*)sendContext->buffer;
     pHeader->type = 4;
@@ -66,8 +64,6 @@ void Service::GetAvailableUsersNickname(SocketInfo* giveMeUsers, Iocp& iocp) {
 void Service::ChatToUserByName(SocketInfo* sender, const std::string &nickName, const std::string &message, Iocp& iocp) {
     if (sender->userName.empty()) return;
     auto *sendContext = new SendContext();
-    ZeroMemory(&sendContext->overlapped, sizeof(WSAOVERLAPPED));
-    sendContext->sendBuf.buf = sendContext->buffer;
     auto* pHeader = (packetHeader*)sendContext->buffer;
     pHeader->type = 3;
 
@@ -82,12 +78,12 @@ void Service::ChatToUserByName(SocketInfo* sender, const std::string &nickName, 
     const size_t slashLen = 3;
 
     size_t msgLen = message.length();
-    memcpy(pBodyPtr, message.c_str(), msgLen);
     pHeader->messageLength = sizeof(packetHeader) + (WORD)nameLen + (WORD)slashLen + (WORD)message.length();
     if (pHeader->messageLength > max_buffer) {
         delete sendContext;
         return;
     }
+    memcpy(pBodyPtr, message.c_str(), msgLen);
     mutex.lock_shared();
     auto it = this->socketMap.find(nickName);
     if (it == socketMap.end()) {mutex.unlock_shared(); return;}
@@ -106,8 +102,6 @@ void Service::ChatToAllUsers(SocketInfo* sender, const std::string &message, Ioc
     if (sender->userName.empty()) return;
 
     auto *sendContext = new SendContext();
-    ZeroMemory(&sendContext->overlapped, sizeof(WSAOVERLAPPED));
-    sendContext->sendBuf.buf = sendContext->buffer;
     auto* pHeader = (packetHeader*)sendContext->buffer;
     pHeader->type = 2;
     char* pBodyPtr = sendContext->buffer+sizeof(packetHeader);
@@ -121,16 +115,16 @@ void Service::ChatToAllUsers(SocketInfo* sender, const std::string &message, Ioc
     const size_t slashLen = 3;
 
     size_t msgLen = message.length();
-    memcpy(pBodyPtr, message.c_str(), msgLen);
     pHeader->messageLength = sizeof(packetHeader) + (WORD)nameLen + (WORD)slashLen + (WORD)message.length();
     if (pHeader->messageLength > max_buffer) {
         delete sendContext;
         return;
     }
+    memcpy(pBodyPtr, message.c_str(), msgLen);
     mutex.lock_shared();
     sendContext->refCount.store(this->socketMap.size());
     if (sendContext->refCount>0) {
-        for (auto v : this->socketMap) {
+        for (auto& v : this->socketMap) {
             iocp.SendPacket(v.second, sendContext, pHeader->messageLength);
         }
     }

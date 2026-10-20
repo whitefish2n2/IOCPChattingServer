@@ -19,16 +19,20 @@ struct RecvContext {
 };
 
 struct SendContext {
+    char buffer[max_buffer];
+    DWORD length;
+    std::atomic<long> refCount = 1;
+};
+struct SendContextIO {
     WSAOVERLAPPED overlapped;
     WSABUF sendBuf;
-    char buffer[max_buffer];
-    std::atomic<long> refCount = 1;
 };
 
 struct SocketInfo {
     SOCKET sock;
     RecvContext recvContext;
-    WSABUF sendBuf;
+
+    SendContextIO sendContextIO;
 
     std::queue<SendContext*> sendQueue;
     std::mutex sendMutex;

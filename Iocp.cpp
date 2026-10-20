@@ -121,8 +121,8 @@ void Iocp::WorkerThread() {
             cout << "접속 끊김 : " << endl;
             Disconnect(completionKey);
             if (overlapped != &(completionKey->recvContext.overlapped)) {
-                SendContext* context = (SendContext*)overlapped;
                 completionKey->sendMutex.lock();
+                SendContext* context = completionKey->sendQueue.front();
                 completionKey->sendQueue.pop();
                 completionKey->sendMutex.unlock();
                 if (context->refCount.fetch_sub(1) == 1) delete context;
@@ -164,18 +164,14 @@ void Iocp::WorkerThread() {
 
         }
         else {
-            SendContext* context = (SendContext*)overlapped;
-            if (context->refCount.fetch_sub(1) == 1) delete context;
             bool failed = false;
             completionKey->sendMutex.lock();
+            SendContext* context = completionKey->sendQueue.front();
+            if (context->refCount.fetch_sub(1) == 1) delete context;
             if (!completionKey->sendQueue.empty()) completionKey->sendQueue.pop();
             if (!completionKey->sendQueue.empty() && !completionKey->closing) {
                 SendContext* pNextContext = completionKey->sendQueue.front();
-                pNextContext->sendBuf.buf = pNextContext->buffer;
-                DWORD sendingByte;
-                completionKey->refCount.fetch_add(1);
-                if (WSASend(completionKey->sock, &pNextContext->sendBuf, 1, &sendingByte, 0, &pNextContext->overlapped, NULL) == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-                    completionKey->refCount.fetch_sub(1);
+                if (!PostSend(completionKey, pNextContext)) {
                     failed = true;
                 };
             }
@@ -190,8 +186,7 @@ void Iocp::WorkerThread() {
 }
 
 void Iocp::SendPacket(SocketInfo *socketInfo, SendContext *sendContext, DWORD messageLength) {
-    sendContext->sendBuf.buf = sendContext->buffer;
-    sendContext->sendBuf.len = messageLength;
+    sendContext->length = messageLength;
 
     socketInfo->sendMutex.lock();
     if (socketInfo->closing) {
@@ -203,16 +198,26 @@ void Iocp::SendPacket(SocketInfo *socketInfo, SendContext *sendContext, DWORD me
     if (socketInfo->isSending == false) {
         socketInfo->isSending = true;
 
-        DWORD sendBytes;
-        socketInfo->refCount.fetch_add(1);
-        if (WSASend(socketInfo->sock, &sendContext->sendBuf, 1, &sendBytes, 0, &sendContext->overlapped, NULL) == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+        if (!PostSend(socketInfo, sendContext)) {
             socketInfo->isSending = false;
-            socketInfo->refCount.fetch_sub(1);
             socketInfo->sendQueue.pop();
             if (sendContext->refCount.fetch_sub(1) == 1) delete sendContext;
         };
     }
     socketInfo->sendMutex.unlock();
+}
+bool Iocp::PostSend(SocketInfo* socketInfo, SendContext* sendContext) {
+    SendContextIO& io = socketInfo->sendContextIO;
+    ZeroMemory(&io.overlapped, sizeof(WSAOVERLAPPED));
+    io.sendBuf.buf = sendContext->buffer;
+    io.sendBuf.len = sendContext->length;
+    socketInfo->refCount.fetch_add(1);
+    DWORD sendBytes;
+    if (WSASend(socketInfo->sock, &io.sendBuf, 1, &sendBytes, 0, &io.overlapped, NULL) == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+        socketInfo->refCount.fetch_sub(1);
+        return false;
+    }
+    return true;
 }
 
 void Iocp::SetNickName(SocketInfo* socketInfo, std::string nickName) {
