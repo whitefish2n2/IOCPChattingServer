@@ -4,7 +4,10 @@
 
 #include "Service.h"
 
+
 #include "Iocp.h"
+
+#define  MESSAGE_PER_THREAD 3000
 
 
 void Service::InsertUserNickname(SocketInfo *socketInfo, const std::string& nickName) {
@@ -97,6 +100,8 @@ bool Service::Initalize() {
     return true;
 }
 
+
+
 void Service::ChatToAllUsers(SocketInfo* sender, const std::string &message, Iocp& iocp) {
 
     if (sender->userName.empty()) return;
@@ -114,7 +119,7 @@ void Service::ChatToAllUsers(SocketInfo* sender, const std::string &message, Ioc
     pBodyPtr += 3;
     const size_t slashLen = 3;
 
-    size_t msgLen = message.length();
+    DWORD msgLen = message.length();
     pHeader->messageLength = sizeof(packetHeader) + (WORD)nameLen + (WORD)slashLen + (WORD)message.length();
     if (pHeader->messageLength > max_buffer) {
         delete sendContext;
@@ -124,8 +129,17 @@ void Service::ChatToAllUsers(SocketInfo* sender, const std::string &message, Ioc
     mutex.lock_shared();
     sendContext->refCount.store(this->socketMap.size());
     if (sendContext->refCount>0) {
-        for (auto& v : this->socketMap) {
-            iocp.SendPacket(v.second, sendContext, pHeader->messageLength);
+        auto current_start = socketMap.begin();
+        auto total_end = socketMap.end();
+        int threadCount = (socketMap.size()/MESSAGE_PER_THREAD) + ((socketMap.size()%MESSAGE_PER_THREAD == 0) ? 0:1);
+        std::vector<std::jthread> threads;
+        threads.reserve(threadCount);
+        for (int i = 0; i < threadCount; i++) {
+            auto remaining_elements = std::distance(current_start, total_end);
+            auto current_chunk = (std::min)(static_cast<long long>(MESSAGE_PER_THREAD), remaining_elements);
+            auto current_end = std::next(current_start, current_chunk);
+            threads.emplace_back(&Service::BroadcastByRange,this, current_start,current_end, sendContext,pHeader->messageLength, &iocp);
+            current_start = current_end;
         }
     }
     else {
@@ -135,6 +149,12 @@ void Service::ChatToAllUsers(SocketInfo* sender, const std::string &message, Ioc
     }
 
     mutex.unlock_shared();
+}
+
+void Service::BroadcastByRange(std::map<std::string, SocketInfo*>::iterator from, std::map<std::string, SocketInfo*>::iterator to, SendContext *context, DWORD length, Iocp* iocp) {
+    for (auto it = from; it != to; it++) {
+        iocp->SendPacket(it->second, context, length);
+    }
 }
 
 

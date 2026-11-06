@@ -9,7 +9,7 @@
 #include <string>
 
 #include "Iocp.h"
-
+#include <condition_variable>
 
 struct SocketInfo;
 
@@ -30,11 +30,17 @@ public:
 
     void ChatToUserByName(SocketInfo *sender, const std::string &nickName, const std::string &message, Iocp &iocp);
     void ChatToAllUsers(SocketInfo *sender, const std::string &message, Iocp &iocp);
+
+    void BroadcastByRange(std::map<std::string, SocketInfo *>::iterator from, std::map<std::string, SocketInfo *>::iterator to, SendContext *
+                          context, DWORD length, Iocp *iocp);
+
 private:
     Service() = default;
     ~Service() = default;
     std::map<std::string, SocketInfo*> socketMap;
     std::shared_mutex mutex;
+    std::condition_variable broadcastClearCV;
+    std::atomic<int> broadcastCounter;
 };
 
 

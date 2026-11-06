@@ -44,7 +44,7 @@ bool Iocp::Initialize() {
         return false;
     }
 
-    nResult = listen(listenSocket, 5);
+    nResult = listen(listenSocket, SOMAXCONN);
     if (nResult == SOCKET_ERROR) {
         cout << "listen failed with error: " << WSAGetLastError() << endl;
         closesocket(listenSocket);
@@ -73,9 +73,7 @@ void Iocp::StartServer() {
         clientSocket = WSAAccept(listenSocket, (struct sockaddr* )&clientAddr, &addrLen,NULL,NULL);
         if (clientSocket == INVALID_SOCKET) {
             cout << "WSAAccept failed with error: " << WSAGetLastError() << endl;
-            closesocket(clientSocket);
-            WSACleanup();
-            return;
+            continue;
         }
         m_pSocketInfo = new SocketInfo();
         m_pSocketInfo->sock = clientSocket;
