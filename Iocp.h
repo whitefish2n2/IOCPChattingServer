@@ -48,6 +48,12 @@ class Iocp {
 
     bool PostSend(SocketInfo *socketInfo, SendContext *sendContext);
 
+    SendContext *PopSend(SocketInfo *s);
+
+    bool StartSend(SocketInfo *s, SendContext *ctx);
+
+    bool SendNext(SocketInfo *s);
+
     void SetNickName(SocketInfo *socketInfo, std::string nickName);
 
     void WisperMessage(SocketInfo *sender, const std::string &target, const std::string &message);

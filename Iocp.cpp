@@ -119,11 +119,11 @@ void Iocp::WorkerThread() {
             cout << "접속 끊김 : " << endl;
             Disconnect(completionKey);
             if (overlapped != &(completionKey->recvContext.overlapped)) {
-                completionKey->sendMutex.lock();
-                SendContext* context = completionKey->sendQueue.front();
-                completionKey->sendQueue.pop();
-                completionKey->sendMutex.unlock();
-                if (context->refCount.fetch_sub(1) == 1) delete context;
+                // 송신 실패: 보내던 메시지만 놓는다. pendingCount는 줄이지 않아 새 송신 담당이 생기지 않고,
+                // 큐에 남은 것은 ReleaseIoRef에서 정리한다
+                SendContext* context = completionKey->inflight;
+                completionKey->inflight = nullptr;
+                if (context && context->refCount.fetch_sub(1) == 1) delete context;
             }
             ReleaseIoRef(completionKey);
             continue;
@@ -145,7 +145,6 @@ void Iocp::WorkerThread() {
                 memmove(completionKey->recvBuffer, completionKey->recvBuffer + pHeader->messageLength, completionKey->recvByteLen);
             }
             bool failed = false;
-            completionKey->sendMutex.lock();
             if (!completionKey->closing) {
                 completionKey->recvContext.recvBuf.buf = completionKey->recvBuffer + completionKey->recvByteLen;
                 completionKey->recvContext.recvBuf.len = max_buffer - completionKey->recvByteLen;
@@ -156,28 +155,19 @@ void Iocp::WorkerThread() {
                     completionKey->refCount.fetch_sub(1);
                     failed = true;
                 }
+                // 락 대신: 거는 사이 Disconnect가 CancelIoEx를 먼저 했으면 여기서 직접 취소한다
+                else if (completionKey->closing) {
+                    CancelIoEx((HANDLE)completionKey->sock, &completionKey->recvContext.overlapped);
+                }
             }
-            completionKey->sendMutex.unlock();
             if (failed) {Disconnect(completionKey);}
 
         }
         else {
-            bool failed = false;
-            completionKey->sendMutex.lock();
-            SendContext* context = completionKey->sendQueue.front();
+            SendContext* context = completionKey->inflight;
+            completionKey->inflight = nullptr;
             if (context->refCount.fetch_sub(1) == 1) delete context;
-            if (!completionKey->sendQueue.empty()) completionKey->sendQueue.pop();
-            if (!completionKey->sendQueue.empty() && !completionKey->closing) {
-                SendContext* pNextContext = completionKey->sendQueue.front();
-                if (!PostSend(completionKey, pNextContext)) {
-                    failed = true;
-                };
-            }
-            else {
-                completionKey->isSending = false;
-            }
-            completionKey->sendMutex.unlock();
-            if (failed) {Disconnect(completionKey);}
+            if (SendNext(completionKey)) {Disconnect(completionKey);}
         }
         ReleaseIoRef(completionKey);
     }
@@ -186,23 +176,46 @@ void Iocp::WorkerThread() {
 void Iocp::SendPacket(SocketInfo *socketInfo, SendContext *sendContext, DWORD messageLength) {
     sendContext->length = messageLength;
 
-    socketInfo->sendMutex.lock();
     if (socketInfo->closing) {
-        socketInfo->sendMutex.unlock();
         if (sendContext->refCount.fetch_sub(1) == 1) delete sendContext;
         return;
     }
     socketInfo->sendQueue.push(sendContext);
-    if (socketInfo->isSending == false) {
-        socketInfo->isSending = true;
+    // 0 → 1로 만든 스레드만 송신 담당이 된다. 나머지는 큐에 넣고 바로 돌아간다
+    if (socketInfo->pendingCount.fetch_add(1) != 0) return;
+    if (socketInfo->closing) return;   // 큐에 남은 것은 ReleaseIoRef에서 정리
+    if (!StartSend(socketInfo, PopSend(socketInfo))) SendNext(socketInfo);
+}
 
-        if (!PostSend(socketInfo, sendContext)) {
-            socketInfo->isSending = false;
-            socketInfo->sendQueue.pop();
-            if (sendContext->refCount.fetch_sub(1) == 1) delete sendContext;
-        };
+// 송신 담당만 부른다. pendingCount가 메시지가 있다고 했으면 넣는 중인 노드가 연결될 때까지 잠깐 기다린다
+SendContext* Iocp::PopSend(SocketInfo* s) {
+    SendContext* ctx;
+    while (!(ctx = s->sendQueue.pop())) std::this_thread::yield();
+    return ctx;
+}
+
+// WSASend를 건다. 실패하면 메시지를 놓고 false
+bool Iocp::StartSend(SocketInfo* s, SendContext* ctx) {
+    s->inflight = ctx;
+    if (!PostSend(s, ctx)) {
+        s->inflight = nullptr;
+        if (ctx->refCount.fetch_sub(1) == 1) delete ctx;
+        return false;
     }
-    socketInfo->sendMutex.unlock();
+    // 거는 사이 Disconnect가 CancelIoEx를 먼저 했으면 직접 취소한다
+    if (s->closing) CancelIoEx((HANDLE)s->sock, &s->sendContextIO.overlapped);
+    return true;
+}
+
+// 송신 담당이 메시지 하나를 끝낸 뒤 부른다. 남은 메시지가 있으면 다음 것을 건다. 반환: 중간에 송신 실패가 있었는지
+bool Iocp::SendNext(SocketInfo* s) {
+    bool failed = false;
+    while (s->pendingCount.fetch_sub(1) > 1) {
+        if (s->closing) return failed;   // pendingCount가 0이 안 되므로 새 담당도 안 생긴다
+        if (StartSend(s, PopSend(s))) return failed;
+        failed = true;
+    }
+    return failed;
 }
 bool Iocp::PostSend(SocketInfo* socketInfo, SendContext* sendContext) {
     SendContextIO& io = socketInfo->sendContextIO;
@@ -323,21 +336,17 @@ void Iocp::DestroyWorkerThread()
 }
 
 void Iocp::Disconnect(SocketInfo* s) {
-    {
-        std::lock_guard<std::mutex> lock(s->sendMutex);
-        if (s->closing) {return;}
-        s->closing = true;
-        CancelIoEx((HANDLE)s->sock, NULL);
-    }
+    if (s->closing.exchange(true)) return;
+    CancelIoEx((HANDLE)s->sock, NULL);
     Service::GetInstance().RemoveUser(s);
 }
 void Iocp::ReleaseIoRef(SocketInfo* s) {
     if (s->refCount.fetch_sub(1) != 1) return;
     closesocket(s->sock);
-    while (!s->sendQueue.empty()) {
-        SendContext* ctx = s->sendQueue.front();
+    // 이 시점엔 넣는 스레드가 없다 (RemoveUser가 끝났고 걸린 I/O도 없음)
+    if (s->inflight && s->inflight->refCount.fetch_sub(1) == 1) delete s->inflight;
+    while (SendContext* ctx = s->sendQueue.pop()) {
         if (ctx->refCount.fetch_sub(1) == 1) delete ctx;
-        s->sendQueue.pop();
     }
     delete s;
 }
